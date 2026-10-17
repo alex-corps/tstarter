@@ -99,8 +99,10 @@ def _build_sku_profiles(conn, rng: np.random.Generator) -> None:
         else:
             klass[i] = "intermittent" if roll < 0.55 else "lumpy"
 
-    # дневной спрос: fast — штуки в день, редкие — доли штуки в день
-    daily = np.where(klass == "fast", 0.4 + base * 1.5, 0.01 + base * 0.15)
+    # fast — штуки в день. Остальные — от ~0.2 шт/день (около 6 шт/месяц).
+    # Явный хвост аутсайдеров только у нижних 10% по рангу, не у половины ассортимента.
+    daily = np.where(klass == "fast", 1.0 + base * 2.0, 0.2 + base * 0.6)
+    daily = np.where(rank > 0.9, daily * 0.25, daily)
 
     lifecycle_roll = rng.random(n)
     lifecycle = np.where(lifecycle_roll < 0.15, "declining",
