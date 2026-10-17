@@ -1,0 +1,7 @@
+psycopg[binary]
+numpy
+pandas
+scipy
+statsmodels
+streamlit
+matplotlib
