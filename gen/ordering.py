@@ -86,12 +86,17 @@ def order_day(conn, world, model, day: dt.date, stock: dict[int, int], transit: 
         skus = [s for s in world.supplier_skus.get(supplier_id, [])
                 if status.get(s) in ("активный", "ввод")]
         for sku_id in skus:
+            recovering = _out_of_stock(sku_id, status, stock)
+            if recovering:
+                _pull_late_arrival(conn, supplier_id, sku_id, day, plan_days, review)
             qty = _order_qty(world, model, day, sku_id, status, stock, transit,
-                             history, plan_days, review, oos_level)
+                             history, plan_days, review, oos_level, recovering)
             if qty <= 0:
                 continue
             rows.append((day, supplier_id, sku_id, int(qty)))
-            arrival = plan_arrival(model.rng, world, supplier_id, day, plan_days, lead_level)
+            arrival = plan_arrival(
+                model.rng, world, supplier_id, day, plan_days, lead_level, recovery=recovering,
+            )
             backorders.append((supplier_id, sku_id, day, int(qty), int(qty), arrival))
             transit[sku_id] = transit.get(sku_id, 0) + int(qty)
 
@@ -107,15 +112,38 @@ def order_day(conn, world, model, day: dt.date, stock: dict[int, int], transit: 
     return len(rows)
 
 
+def _out_of_stock(sku_id: int, status: dict, stock: dict) -> bool:
+    """Активная позиция с нулевым остатком. Её дефицит нельзя тянуть дольше 1–2 поставок."""
+    return status.get(sku_id) in ("активный", "ввод") and stock.get(sku_id, 0) <= 0
+
+
+def _pull_late_arrival(conn, supplier_id: int, sku_id: int, day: dt.date,
+                       plan_days: int, review: int) -> None:
+    """Если открытый заказ приедет позже ближайших двух циклов, подтягивает его к плановому сроку."""
+    horizon = day + dt.timedelta(days=plan_days + review)
+    nearest = day + dt.timedelta(days=max(plan_days, 1))
+    conn.execute(
+        """
+        update gen_internal.backorder
+        set resolve_dt = %s
+        where supplier_id = %s and sku_id = %s and open_qnty > 0 and resolve_dt > %s
+        """,
+        (nearest, supplier_id, sku_id, horizon),
+    )
+
+
 def _order_qty(world, model, day, sku_id, status, stock, transit, history,
-               plan_days, review, oos_level) -> int:
+               plan_days, review, oos_level, recovering: bool) -> int:
     pack = max(1, world.sku_info[sku_id][4])
     profile = world.profile_info[sku_id]
     st = status.get(sku_id)
 
     daily = _forecast_daily(world, sku_id, st, history, profile)
     if daily <= 0:
-        return 0
+        if not recovering:
+            return 0
+        # при обнулившейся истории спрос берём из профиля, иначе заказ не возникнет
+        daily = max(float(profile[2]), 0.05)
 
     abc = profile[7]
     z = SERVICE_Z.get(abc, 1.0)
@@ -124,11 +152,16 @@ def _order_qty(world, model, day, sku_id, status, stock, transit, history,
     sigma_l = world.supplier_info[world.sku_info[sku_id][2]][2]
     ss = z * np.sqrt(plan_days * sigma_d ** 2 + daily ** 2 * sigma_l ** 2)
 
-    # провоцирование OOS: с вероятностью, заданной параметром, страховой запас обнуляется
-    if model.rng.random() < oos_cycle_prob(oos_level):
+    # провоцирование OOS только пока остаток есть. Уже пустую позицию так не удерживаем.
+    if not recovering and model.rng.random() < oos_cycle_prob(oos_level):
         ss = 0.0
 
-    target = daily * (review + plan_days) + ss
+    cover = review + plan_days
+    if recovering:
+        # запас до следующей поставки после той, что закроет текущий дефицит
+        cover += review
+        ss = max(ss, daily * review)
+    target = daily * cover + ss
     position = stock.get(sku_id, 0) + transit.get(sku_id, 0)
     if position >= target:
         return 0

@@ -13,8 +13,15 @@ from gen.db import copy_rows
 
 
 def plan_arrival(rng: np.random.Generator, world, supplier_id: int, order_date: dt.date,
-                 plan_days: int, lead_level: int) -> dt.date:
-    """Фактическая дата прихода: плановый срок плюс отклонение по профилю поставщика."""
+                 plan_days: int, lead_level: int, recovery: bool = False) -> dt.date:
+    """Фактическая дата прихода: плановый срок плюс отклонение по профилю поставщика.
+
+    Заказ, который закрывает уже случившийся OOS, приходит в плановый срок,
+    без длинного хвоста нестабильного поставщика.
+    """
+    if recovery:
+        days = max(1, plan_days + int(rng.integers(0, 3)))
+        return order_date + dt.timedelta(days=days)
     _, stable, lead_sigma, lead_bias, _ = world.supplier_info[supplier_id]
     factor = lead_sigma_factor(lead_level)
     sigma = lead_sigma * factor
