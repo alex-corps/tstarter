@@ -24,7 +24,7 @@ class World:
     sku_customers: dict             # sku_id -> (customer_ids, weights)
     suppliers: pd.DataFrame         # индекс supplier_id
     supplier_info: dict             # supplier_id -> (plan_days, stable, lead_sigma, lead_bias, short_prob)
-    schedule: dict                  # supplier_id -> отсортированный список дат заказов
+    schedule: dict                  # supplier_id -> отсортированный список income_order_dt
     schedule_set: dict              # supplier_id -> множество дат заказов
     supplier_skus: dict             # supplier_id -> [sku_id]
     cross_groups: dict              # cross_group_id -> [sku_id]
@@ -67,7 +67,7 @@ def load_world(conn) -> World:
 
     schedule: dict[int, list] = {}
     for supplier_id, order_dt in conn.execute(
-        "select supplier_id, order_dt from supplier_schedule order by supplier_id, order_dt"
+        "select supplier_id, income_order_dt from supplier_schedule order by supplier_id, income_order_dt"
     ).fetchall():
         schedule.setdefault(supplier_id, []).append(order_dt)
 

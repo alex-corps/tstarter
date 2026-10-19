@@ -2,6 +2,7 @@
 
 На пустой базе создаёт схему (sql/000_schema.sql) и загружает справочники из data/seed.
 На старой базе, где sale_order_day ещё без date_dt, применяет sql/001_alter.sql.
+Если заказы ещё лежат в income_order_day, применяет sql/002_order_headers.sql.
 Повторный запуск ничего не перезаписывает.
 """
 
@@ -16,6 +17,7 @@ from gen.db import connect  # noqa: E402
 SEED = ROOT / "data" / "seed"
 SCHEMA = ROOT / "sql" / "000_schema.sql"
 ALTER = ROOT / "sql" / "001_alter.sql"
+HEADERS = ROOT / "sql" / "002_order_headers.sql"
 
 # порядок важен: внешние ключи
 SEED_TABLES = [
@@ -42,15 +44,24 @@ def _table_exists(conn, name: str) -> bool:
     return row is not None
 
 
-def _column_exists(conn, table: str, column: str) -> bool:
+def _column_exists(conn, table: str, column: str, schema: str = "public") -> bool:
     row = conn.execute(
         """
         select 1 from information_schema.columns
-        where table_schema = 'public' and table_name = %s and column_name = %s
+        where table_schema = %s and table_name = %s and column_name = %s
         """,
-        (table, column),
+        (schema, table, column),
     ).fetchone()
     return row is not None
+
+
+def _needs_order_headers(conn) -> bool:
+    return (
+        not _table_exists(conn, "income_order")
+        or not _column_exists(conn, "supplier_schedule", "income_order_dt")
+        or not _column_exists(conn, "dim_supplier", "order_day_of_week")
+        or not _column_exists(conn, "backorder", "income_order_id", schema="gen_internal")
+    )
 
 
 def _load_seed(conn) -> None:
@@ -72,11 +83,15 @@ def main() -> None:
     if not _table_exists(conn, "dim_products"):
         print("создаю схему")
         _apply(conn, SCHEMA)
-    elif not _column_exists(conn, "sale_order_day", "date_dt"):
-        print("применяю миграцию 001_alter.sql")
-        _apply(conn, ALTER)
     else:
-        print("схема актуальна")
+        if not _column_exists(conn, "sale_order_day", "date_dt"):
+            print("применяю миграцию 001_alter.sql")
+            _apply(conn, ALTER)
+        if _needs_order_headers(conn):
+            print("применяю миграцию 002_order_headers.sql")
+            _apply(conn, HEADERS)
+        else:
+            print("схема актуальна")
     _load_seed(conn)
     conn.close()
 

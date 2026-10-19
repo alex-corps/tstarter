@@ -4,8 +4,6 @@ import psycopg
 
 from gen.config import DEFAULT_PARAMS, DSN
 
-FACT_TABLES = ("sale_order_day", "income_day", "income_order_day", "rest_day")
-
 
 def connect():
     return psycopg.connect(DSN)
@@ -25,8 +23,48 @@ def copy_rows(conn, table: str, columns: list[str], rows) -> int:
 def rollback_from(conn, date_from) -> None:
     """Удаляет все рассчитанные данные начиная с даты, чтобы период можно было пересчитать."""
     with conn.cursor() as cur:
-        for table in FACT_TABLES:
-            cur.execute(f"delete from {table} where date_dt >= %s", (date_from,))
+        cur.execute("delete from sale_order_day where date_dt >= %s", (date_from,))
+        cur.execute("delete from rest_day where date_dt >= %s", (date_from,))
+        # приход заказа, размещённого до окна, удаляется вместе с окном и должен приехать снова
+        cur.execute(
+            """
+            update gen_internal.backorder b
+            set open_qnty = b.order_qnty
+            where b.order_dt < %s
+              and b.income_order_id in (
+                  select income_order_id from income where date_dt >= %s
+              )
+            """,
+            (date_from, date_from),
+        )
+        cur.execute(
+            """
+            delete from income_detail
+            where income_id in (
+                select i.income_id
+                from income i
+                left join income_order o on o.income_order_id = i.income_order_id
+                where i.date_dt >= %s or o.date_dt >= %s
+            )
+            """,
+            (date_from, date_from),
+        )
+        cur.execute(
+            """
+            delete from income
+            where date_dt >= %s
+               or income_order_id in (select income_order_id from income_order where date_dt >= %s)
+            """,
+            (date_from, date_from),
+        )
+        cur.execute(
+            """
+            delete from income_order_detail
+            where income_order_id in (select income_order_id from income_order where date_dt >= %s)
+            """,
+            (date_from,),
+        )
+        cur.execute("delete from income_order where date_dt >= %s", (date_from,))
         cur.execute("delete from gen_internal.truth_demand where date_dt >= %s", (date_from,))
         cur.execute("delete from gen_internal.calc_log where date_dt >= %s", (date_from,))
         cur.execute("delete from gen_internal.backorder where order_dt >= %s", (date_from,))

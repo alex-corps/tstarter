@@ -69,6 +69,31 @@ class History:
         return float(self.sold[i, cols].mean())
 
 
+def write_supplier_order(conn, day: dt.date, supplier_id: int, lines: list[tuple[int, int]],
+                         resolve_dt: dt.date) -> int:
+    """Один заказ поставщику: шапка, строки SKU и одна дата прихода на весь заказ."""
+    if not lines:
+        return 0
+    lines = sorted((int(sku_id), int(qty)) for sku_id, qty in lines)
+    order_id = conn.execute(
+        "insert into income_order (date_dt, supplier_id) values (%s, %s) returning income_order_id",
+        (day, supplier_id),
+    ).fetchone()[0]
+    copy_rows(
+        conn,
+        "income_order_detail",
+        ["income_order_id", "sku_id", "qnty"],
+        [(order_id, sku_id, qty) for sku_id, qty in lines],
+    )
+    copy_rows(
+        conn,
+        "gen_internal.backorder",
+        ["income_order_id", "supplier_id", "sku_id", "order_dt", "order_qnty", "open_qnty", "resolve_dt"],
+        [(order_id, supplier_id, sku_id, day, qty, qty, resolve_dt) for sku_id, qty in lines],
+    )
+    return len(lines)
+
+
 def order_day(conn, world, model, day: dt.date, stock: dict[int, int], transit: dict[int, int],
               status: dict[int, str], user_suppliers: set[int], oos_level: int, lead_level: int,
               history: "History") -> int:
@@ -78,13 +103,13 @@ def order_day(conn, world, model, day: dt.date, stock: dict[int, int], transit: 
     if not due_suppliers:
         return 0
 
-    rows = []
-    backorders = []
+    total = 0
     for supplier_id in due_suppliers:
         plan_days = _plan_days(world, supplier_id, day)
         review = _review_interval(world, supplier_id, day)
         skus = [s for s in world.supplier_skus.get(supplier_id, [])
                 if status.get(s) in ("активный", "ввод")]
+        lines = []
         for sku_id in skus:
             recovering = _out_of_stock(sku_id, status, stock)
             if recovering:
@@ -93,23 +118,14 @@ def order_day(conn, world, model, day: dt.date, stock: dict[int, int], transit: 
                              history, plan_days, review, oos_level, recovering)
             if qty <= 0:
                 continue
-            rows.append((day, supplier_id, sku_id, int(qty)))
-            arrival = plan_arrival(
-                model.rng, world, supplier_id, day, plan_days, lead_level, recovery=recovering,
-            )
-            backorders.append((supplier_id, sku_id, day, int(qty), int(qty), arrival))
+            lines.append((sku_id, int(qty)))
             transit[sku_id] = transit.get(sku_id, 0) + int(qty)
-
-    copy_rows(conn, "income_order_day", ["date_dt", "supplier_id", "sku_id", "qnty"], rows)
-    with conn.cursor() as cur:
-        cur.executemany(
-            """insert into gen_internal.backorder
-               (supplier_id, sku_id, order_dt, order_qnty, open_qnty, resolve_dt)
-               values (%s,%s,%s,%s,%s,%s)
-               on conflict (supplier_id, sku_id, order_dt) do nothing""",
-            backorders,
-        )
-    return len(rows)
+        if not lines:
+            continue
+        # один розыгрыш срока на весь заказ, иначе строки одного документа разъедутся по датам
+        arrival = plan_arrival(model.rng, world, supplier_id, day, plan_days, lead_level)
+        total += write_supplier_order(conn, day, supplier_id, lines, arrival)
+    return total
 
 
 def _out_of_stock(sku_id: int, status: dict, stock: dict) -> bool:
@@ -119,14 +135,21 @@ def _out_of_stock(sku_id: int, status: dict, stock: dict) -> bool:
 
 def _pull_late_arrival(conn, supplier_id: int, sku_id: int, day: dt.date,
                        plan_days: int, review: int) -> None:
-    """Если открытый заказ приедет позже ближайших двух циклов, подтягивает его к плановому сроку."""
+    """Если открытый заказ приедет позже ближайших двух циклов, подтягивает его к плановому сроку.
+
+    Дата одна на весь заказ, поэтому сдвигается приход целиком, а не отдельная строка.
+    """
     horizon = day + dt.timedelta(days=plan_days + review)
     nearest = day + dt.timedelta(days=max(plan_days, 1))
     conn.execute(
         """
         update gen_internal.backorder
         set resolve_dt = %s
-        where supplier_id = %s and sku_id = %s and open_qnty > 0 and resolve_dt > %s
+        where income_order_id in (
+            select income_order_id
+            from gen_internal.backorder
+            where supplier_id = %s and sku_id = %s and open_qnty > 0 and resolve_dt > %s
+        )
         """,
         (nearest, supplier_id, sku_id, horizon),
     )

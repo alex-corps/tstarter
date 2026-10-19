@@ -16,32 +16,26 @@ from user_orders import calc_orders
 
 def _user_orders(conn, world, model, day, stock, transit, status, users, lead_level) -> int:
     """Заказы поставщиков в режиме user: берёт расчёт из user_orders.py."""
-    from gen.db import copy_rows
+    from gen.ordering import write_supplier_order
     from gen.receipts import plan_arrival
 
     due = [s for s in users if day in world.schedule_set.get(s, ())]
-    rows, backorders = [], []
+    total = 0
     for supplier_id in due:
         frame = calc_orders(conn, supplier_id, day)
         plan_days = world.supplier_info[supplier_id][0]
+        lines = []
         for sku_id, qty in frame.itertuples(index=False):
             sku_id, qty = int(sku_id), int(qty)
             if qty <= 0 or status.get(sku_id) == "вывод":
                 continue
-            rows.append((day, supplier_id, sku_id, qty))
-            arrival = plan_arrival(model.rng, world, supplier_id, day, plan_days, lead_level)
-            backorders.append((supplier_id, sku_id, day, qty, qty, arrival))
+            lines.append((sku_id, qty))
             transit[sku_id] = transit.get(sku_id, 0) + qty
-    copy_rows(conn, "income_order_day", ["date_dt", "supplier_id", "sku_id", "qnty"], rows)
-    with conn.cursor() as cur:
-        cur.executemany(
-            """insert into gen_internal.backorder
-               (supplier_id, sku_id, order_dt, order_qnty, open_qnty, resolve_dt)
-               values (%s,%s,%s,%s,%s,%s)
-               on conflict (supplier_id, sku_id, order_dt) do nothing""",
-            backorders,
-        )
-    return len(rows)
+        if not lines:
+            continue
+        arrival = plan_arrival(model.rng, world, supplier_id, day, plan_days, lead_level)
+        total += write_supplier_order(conn, day, supplier_id, lines, arrival)
+    return total
 
 
 def run(conn, date_from: dt.date, date_to: dt.date, progress=None) -> dict:

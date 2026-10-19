@@ -28,17 +28,17 @@ def next_user_order_day(today: dt.date) -> dt.date | None:
         return None
     row = conn.execute(
         """
-        select min(s.order_dt)
+        select min(s.income_order_dt)
         from supplier_schedule s
         where s.supplier_id = any(%s)
-          and s.order_dt > %s
+          and s.income_order_dt > %s
           and exists (
               select 1 from current_assortment a
               join dim_products p on p.sku_id = a.sku_id
               where p.supplier_id = s.supplier_id
                 and a.status = 'активный'
-                and a.date_from_dt <= s.order_dt
-                and (a.date_to_dt is null or a.date_to_dt >= s.order_dt)
+                and a.date_from_dt <= s.income_order_dt
+                and (a.date_to_dt is null or a.date_to_dt >= s.income_order_dt)
           )
         """,
         (list(users), today),
@@ -124,8 +124,8 @@ st.header("Сводка")
 summary = conn.execute(
     """
     select (select count(*) from sale_order_day) as sales,
-           (select count(*) from income_order_day) as orders,
-           (select count(*) from income_day) as incomes,
+           (select count(*) from income_order_detail) as orders,
+           (select count(*) from income_detail) as incomes,
            (select count(*) from gen_internal.truth_demand where promo) as promo_days,
            (select coalesce(sum(lost_qnty),0) from gen_internal.truth_demand) as lost
     """
